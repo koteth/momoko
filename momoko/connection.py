@@ -23,6 +23,10 @@ from tornado.ioloop import IOLoop
 from .utils import log
 from .exceptions import PoolError
 
+from datetime import timedelta
+
+MAX_RETRY = 10
+DEFAULT_RETRY_TIME = 2
 
 # The dummy callback is used to keep the asynchronous cursor alive in case no
 # callback has been specified. This will prevent the cursor from being garbage
@@ -91,7 +95,9 @@ class Pool:
     def transaction(self,
         statements,
         cursor_factory=None,
-        callback=None
+        callback=None,
+        retry=0,
+        retry_seconds=DEFAULT_RETRY_TIME,
     ):
         """
         Run a sequence of SQL queries in a database transaction.
@@ -101,9 +107,14 @@ class Pool:
         """
         connection = self._get_connection()
         if not connection:
-            log.warning('Transaction: no connection available, operation queued.')
-            return self._ioloop.add_callback(partial(self.transaction,
-                statements, cursor_factory, callback))
+            next_retry_timedelta = timedelta(seconds=retry_seconds)
+            log.warning('Transaction: no connection available, operation queued. Retry n %s. Max retry: %s' % (retry, MAX_RETRY))
+            if retry < MAX_RETRY:
+                return self._ioloop.add_timeout(next_retry_timedelta, partial(self.transaction,
+                    statements, cursor_factory, callback, retry + 1))
+            else:
+                log.warning('Transaction: no connection available, max retry reached. I give up.')
+                return
 
         connection.transaction(statements, cursor_factory, callback)
 
@@ -111,7 +122,9 @@ class Pool:
         operation,
         parameters=(),
         cursor_factory=None,
-        callback=None
+        callback=None,
+        retry=0,
+        retry_seconds=DEFAULT_RETRY_TIME,
     ):
         """
         Prepare and execute a database operation (query or command).
@@ -121,9 +134,14 @@ class Pool:
         """
         connection = self._get_connection()
         if not connection:
-            log.warning('Execute: no connection available, operation queued.')
-            return self._ioloop.add_callback(partial(self.execute,
-                operation, parameters, cursor_factory, callback))
+            next_retry_timedelta = timedelta(seconds=retry_seconds)
+            log.warning('Execute: no connection available, operation queued. Retry n %s. Max retry: %s' % (retry, MAX_RETRY))
+            if retry < MAX_RETRY:
+                return self._ioloop.add_timeout(next_retry_timedelta, partial(self.execute,
+                    operation, parameters, cursor_factory, callback, retry + 1))
+            else:
+                log.warning('Execute: no connection available, max retry reached. I give up.')
+                raise PoolError('No connection available')
 
         connection.execute(operation, parameters, cursor_factory, callback)
 

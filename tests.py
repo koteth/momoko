@@ -267,6 +267,25 @@ class MomokoTest(BaseTest):
 
         self.run_gen(func)
 
+
+
+    def test_wait_all_ops_retry(self):
+        @gen.engine
+        def func():
+            nr_queries= 6
+            for l in range(nr_queries):
+                self.db.execute('SELECT %s;' % l, callback=(yield gen.Callback('q%s' % l)))
+            cursors = yield momoko.WaitAllOps(['q%s'%l for l in range(nr_queries)])
+
+            self.assert_equal(cursors[1].fetchone(), (1,))
+            self.assert_equal(cursors[2].fetchone(), (2,))
+            self.assert_equal(cursors[3].fetchone(), (3,))
+            self.assert_equal(cursors[nr_queries-1].fetchone(), (nr_queries-1,))
+            self.stop()
+
+        self.run_gen(func)
+
+
     def test_wait_all_ops_exception(self):
         @gen.engine
         def func():
