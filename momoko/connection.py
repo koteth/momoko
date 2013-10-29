@@ -17,7 +17,6 @@ from psycopg2.extras import register_hstore as _psy_register_hstore
 from psycopg2.extensions import (connection as base_connection, cursor as base_cursor,
     POLL_OK, POLL_READ, POLL_WRITE, POLL_ERROR, TRANSACTION_STATUS_IDLE)
 
-from tornado import gen
 from tornado.ioloop import IOLoop
 
 from .utils import log
@@ -25,8 +24,6 @@ from .exceptions import PoolError
 
 from datetime import timedelta
 
-MAX_RETRY = 10
-DEFAULT_RETRY_TIME = 2
 
 # The dummy callback is used to keep the asynchronous cursor alive in case no
 # callback has been specified. This will prevent the cursor from being garbage
@@ -50,13 +47,16 @@ class Pool:
         A callable that's called after all the connections are created. Defaults to ``None``.
     :param ioloop: An instance of Tornado's IOLoop. Defaults to ``None``.
     """
+
     def __init__(self,
-        dsn,
-        connection_factory=None,
-        size=1,
-        callback=None,
-        ioloop=None
-    ):
+                 dsn,
+                 connection_factory=None,
+                 size=1,
+                 callback=None,
+                 ioloop=None,
+                 max_retry=10,
+                 default_retry_time=2
+                 ):
         assert size > 0, 'The connection pool size must be a number above 0.'
 
         self.dsn = dsn
@@ -66,6 +66,9 @@ class Pool:
 
         self._ioloop = ioloop or IOLoop.instance()
         self._pool = []
+
+        self.max_retry=max_retry
+        self.default_retry_time=default_retry_time
 
         # Create connections
         def after_pool_creation(n, connection):
@@ -93,30 +96,42 @@ class Pool:
                 return connection
 
     def transaction(self,
-        statements,
-        cursor_factory=None,
-        callback=None,
-        retry=0,
-        retry_seconds=DEFAULT_RETRY_TIME,
-    ):
+                    statements,
+                    cursor_factory=None,
+                    callback=None,
+                    retry=0,
+                    retry_seconds=None,
+                    timeout=None
+                    ):
         """
         Run a sequence of SQL queries in a database transaction.
 
         See :py:meth:`momoko.Connection.transaction` for documentation about the
         parameters.
         """
+        if retry_seconds is None:
+            retry_seconds = self.default_retry_time
         connection = self._get_connection()
         if not connection:
             next_retry_timedelta = timedelta(seconds=retry_seconds)
-            log.warning('Transaction: no connection available, operation queued. Retry n %s. Max retry: %s' % (retry, MAX_RETRY))
-            if retry < MAX_RETRY:
+            log.warning('Transaction: no connection available, operation queued. Retry n %s. Max retry: %s' % (
+                retry, self.max_retry))
+            if retry < self.max_retry:
                 return self._ioloop.add_timeout(next_retry_timedelta, partial(self.transaction,
-                    statements, cursor_factory, callback, retry + 1))
+                                                                              statements, cursor_factory, callback,
+                                                                              retry + 1))
             else:
                 log.warning('Transaction: no connection available, max retry reached. I give up.')
                 return
 
-        connection.transaction(statements, cursor_factory, callback)
+        timeout_handler = None
+        if timeout:
+            pid = connection.connection.get_backend_pid()
+            timeout_handler = self._ioloop.add_timeout(timedelta(seconds=timeout),
+                                                       partial(self._abort_query, pid, cursor_factory))
+
+        connection.transaction(statements, cursor_factory,
+                               partial(self._remove_timeout, timeout_handler, callback))
 
     def execute(self,
         operation,
@@ -124,7 +139,8 @@ class Pool:
         cursor_factory=None,
         callback=None,
         retry=0,
-        retry_seconds=DEFAULT_RETRY_TIME,
+        retry_seconds=None,
+        timeout=None,
     ):
         """
         Prepare and execute a database operation (query or command).
@@ -132,25 +148,54 @@ class Pool:
         See :py:meth:`momoko.Connection.execute` for documentation about the
         parameters.
         """
+        if retry_seconds is None:
+            retry_seconds = self.default_retry_time
         connection = self._get_connection()
         if not connection:
             next_retry_timedelta = timedelta(seconds=retry_seconds)
-            log.warning('Execute: no connection available, operation queued. Retry n %s. Max retry: %s' % (retry, MAX_RETRY))
-            if retry < MAX_RETRY:
+            log.warning(
+                'Execute: no connection available, operation queued. Retry n %s. Max retry: %s' % (
+                retry, self.max_retry))
+            if retry < self.max_retry:
                 return self._ioloop.add_timeout(next_retry_timedelta, partial(self.execute,
-                    operation, parameters, cursor_factory, callback, retry + 1))
+                                                                              operation, parameters, cursor_factory,
+                                                                              callback, retry + 1, retry_seconds,
+                                                                              timeout))
             else:
                 log.warning('Execute: no connection available, max retry reached. I give up.')
                 raise PoolError('No connection available')
 
-        connection.execute(operation, parameters, cursor_factory, callback)
+        timeout_handler = None
+        if timeout:
+            pid = connection.connection.get_backend_pid()
+            timeout_handler = self._ioloop.add_timeout(timedelta(seconds=timeout),
+                                                       partial(self._abort_query, pid, cursor_factory))
+
+        connection.execute(operation, parameters, cursor_factory,
+                           partial(self._remove_timeout, timeout_handler, callback))
+
+    def _abort_query(self, pid, cursor_factory):
+        connection = self._get_connection()
+        assert connection
+        connection.execute("select * from pg_cancel_backend(%(pid)s)", {'pid':pid}, cursor_factory=cursor_factory,
+                           callback=self._raise_exception)
+
+    @staticmethod
+    def _raise_exception(*args, **kwargs):
+        raise psycopg2.OperationalError('Query Timeout')
+
+    def _remove_timeout(self, timeout_handler, callback, result, error):
+        if timeout_handler:
+            self._ioloop.remove_handler(timeout_handler)
+        if callback:
+            callback(result, error)
 
     def callproc(self,
-        procname,
-        parameters=(),
-        cursor_factory=None,
-        callback=None
-    ):
+                 procname,
+                 parameters=(),
+                 cursor_factory=None,
+                 callback=None
+                 ):
         """
         Call a stored database procedure with the given name.
 

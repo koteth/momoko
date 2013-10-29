@@ -35,7 +35,6 @@ elif psycopg2_impl == 'psycopg2ct':
 import momoko
 import psycopg2
 
-
 class BaseTest(AsyncTestCase):
     def __init__(self, *args, **kwargs):
         self.assert_equal = self.assertEqual
@@ -73,19 +72,22 @@ class BaseTest(AsyncTestCase):
 
 class MomokoTest(BaseTest):
     def clean_db(self):
-        self.db.execute('DROP TABLE IF EXISTS unit_test_large_query;',
-            callback=self.stop_callback)
+        self.db.execute('DROP TABLE IF EXISTS unit_test_timeout;', callback=self.stop_callback)
         self.wait_for_result()
-        self.db.execute('DROP TABLE IF EXISTS unit_test_transaction;',
-            callback=self.stop_callback)
+        self.db.execute('DROP TABLE IF EXISTS unit_test_large_query;', callback=self.stop_callback)
         self.wait_for_result()
-        self.db.execute('DROP FUNCTION IF EXISTS  unit_test_callproc(integer);',
-            callback=self.stop_callback)
+        self.db.execute('DROP TABLE IF EXISTS unit_test_transaction;', callback=self.stop_callback)
+        self.wait_for_result()
+        self.db.execute('DROP FUNCTION IF EXISTS  unit_test_callproc(integer);', callback=self.stop_callback)
         self.wait_for_result()
 
     def prepare_db(self):
         self.clean_db()
 
+        self.db.execute(
+            'CREATE TABLE unit_test_timeout (id serial NOT NULL, name character varying, data text);',
+            callback=self.stop_callback)
+        self.wait_for_result()
         self.db.execute(
             'CREATE TABLE unit_test_large_query ('
             'id serial NOT NULL, name character varying, data text);',
@@ -267,15 +269,13 @@ class MomokoTest(BaseTest):
 
         self.run_gen(func)
 
-
-
     def test_wait_all_ops_retry(self):
         @gen.engine
         def func():
-            nr_queries= 6
+            nr_queries = 6
             for l in range(nr_queries):
                 self.db.execute('SELECT %s;' % l, callback=(yield gen.Callback('q%s' % l)))
-            cursors = yield momoko.WaitAllOps(['q%s'%l for l in range(nr_queries)])
+            cursors = yield momoko.WaitAllOps(['q%s' % l for l in range(nr_queries)])
 
             self.assert_equal(cursors[1].fetchone(), (1,))
             self.assert_equal(cursors[2].fetchone(), (2,))
@@ -284,7 +284,6 @@ class MomokoTest(BaseTest):
             self.stop()
 
         self.run_gen(func)
-
 
     def test_wait_all_ops_exception(self):
         @gen.engine
@@ -299,6 +298,50 @@ class MomokoTest(BaseTest):
 
         self.assert_raises(psycopg2.ProgrammingError, self.run_gen, func)
 
+    def test_a_statement_too_slow_should_be_stopped_and_rolled_back_returning_exception(self):
+        @gen.engine
+        def func():
+            max_execution_time = 0.1
+            self.db.execute('INSERT INTO unit_test_timeout (data) VALUES (%(data)s);'
+                            'SELECT * FROM pg_sleep(%(sleep_time)s);',
+                            {'sleep_time': max_execution_time * 2, 'data': 'never to be written'},
+                            timeout=max_execution_time,
+                            callback=(yield gen.Callback('q1')))
+            yield momoko.WaitOp('q1')
+            self.stop()
+
+        self.assert_raises(psycopg2.OperationalError, self.run_gen, func)
+        #self.run_gen(func)
+
+        @gen.engine
+        def func2():
+            self.db.execute('SELECT * FROM unit_test_timeout;', callback=(yield gen.Callback('q2')))
+            cursor = yield momoko.WaitOp('q2')
+            assert len(cursor.fetchall()) == 0
+            self.stop()
+        self.run_gen(func2)
+
+    def test_a_transaction_too_slow_should_be_stopped_and_rolled_back_returning_exception(self):
+        @gen.engine
+        def func():
+            max_execution_time = 0.1
+            query_data = {'sleep_time': max_execution_time * 2, 'data': 'never to be written'}
+            self.db.transaction([('INSERT INTO unit_test_timeout (data) VALUES (%(data)s);', query_data),
+                                 ('SELECT * FROM pg_sleep(%(sleep_time)s);', query_data)],
+                                timeout=max_execution_time,
+                                callback=(yield gen.Callback('q1')))
+            yield momoko.WaitOp('q1')
+            self.stop()
+
+        self.assert_raises(psycopg2.OperationalError, self.run_gen, func)
+
+        @gen.engine
+        def func2():
+            self.db.execute('SELECT * FROM unit_test_timeout;', callback=(yield gen.Callback('q2')))
+            cursor = yield momoko.WaitOp('q2')
+            assert len(cursor.fetchall()) == 0
+            self.stop()
+        self.run_gen(func2)
 
 if __name__ == '__main__':
     unittest.main()
