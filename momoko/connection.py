@@ -15,7 +15,7 @@ from collections import deque
 import psycopg2
 from psycopg2.extras import register_hstore as _psy_register_hstore
 from psycopg2.extensions import (connection as base_connection, cursor as base_cursor,
-    POLL_OK, POLL_READ, POLL_WRITE, POLL_ERROR, TRANSACTION_STATUS_IDLE)
+                                 POLL_OK, POLL_READ, POLL_WRITE, POLL_ERROR, TRANSACTION_STATUS_IDLE)
 
 from tornado.ioloop import IOLoop
 
@@ -67,8 +67,8 @@ class Pool:
         self._ioloop = ioloop or IOLoop.instance()
         self._pool = []
 
-        self.max_retry=max_retry
-        self.default_retry_time=default_retry_time
+        self.max_retry = max_retry
+        self.default_retry_time = default_retry_time
 
         # Create connections
         def after_pool_creation(n, connection):
@@ -134,14 +134,14 @@ class Pool:
                                partial(self._remove_timeout, timeout_handler, callback))
 
     def execute(self,
-        operation,
-        parameters=(),
-        cursor_factory=None,
-        callback=None,
-        retry=0,
-        retry_seconds=None,
-        timeout=None,
-    ):
+                operation,
+                parameters=(),
+                cursor_factory=None,
+                callback=None,
+                retry=0,
+                retry_seconds=None,
+                timeout=None,
+                ):
         """
         Prepare and execute a database operation (query or command).
 
@@ -177,7 +177,7 @@ class Pool:
     def _abort_query(self, pid, cursor_factory):
         connection = self._get_connection()
         assert connection
-        connection.execute("select * from pg_cancel_backend(%(pid)s)", {'pid':pid}, cursor_factory=cursor_factory,
+        connection.execute("select * from pg_cancel_backend(%(pid)s)", {'pid': pid}, cursor_factory=cursor_factory,
                            callback=self._raise_exception)
 
     @staticmethod
@@ -206,15 +206,15 @@ class Pool:
         if not connection:
             log.warning('Callproc: no connection available, operation queued.')
             return self._ioloop.add_callback(partial(self.callproc,
-                procname, parameters, cursor_factory, callback))
+                                                     procname, parameters, cursor_factory, callback))
 
         connection.callproc(procname, parameters, cursor_factory, callback)
 
     def mogrify(self,
-        operation,
-        parameters=(),
-        callback=None
-    ):
+                operation,
+                parameters=(),
+                callback=None
+                ):
         """
         Return a query string after arguments binding.
 
@@ -285,14 +285,15 @@ class Connection:
     .. _psycopg2.extensions.connection: http://initd.org/psycopg/docs/connection.html#connection
     .. _Connection and cursor factories: http://initd.org/psycopg/docs/advanced.html#subclassing-cursor
     """
+
     def __init__(self,
-        dsn,
-        connection_factory=None,
-        callback=None,
-        ioloop=None
-    ):
+                 dsn,
+                 connection_factory=None,
+                 callback=None,
+                 ioloop=None
+                 ):
         self.connection = psycopg2.connect(dsn, async=1,
-            connection_factory=connection_factory or base_connection)
+                                           connection_factory=connection_factory or base_connection)
         self.fileno = self.connection.fileno()
         self._transaction_status = self.connection.get_transaction_status
         self.ioloop = ioloop or IOLoop.instance()
@@ -322,11 +323,11 @@ class Connection:
                 raise psycopg2.OperationalError('poll() returned {0}'.format(state))
 
     def execute(self,
-        operation,
-        parameters=(),
-        cursor_factory=None,
-        callback=None
-    ):
+                operation,
+                parameters=(),
+                cursor_factory=None,
+                callback=None
+                ):
         """
         Prepare and execute a database operation (query or command).
 
@@ -354,11 +355,11 @@ class Connection:
         self.ioloop.add_handler(self.fileno, self.io_callback, IOLoop.WRITE)
 
     def callproc(self,
-        procname,
-        parameters=(),
-        cursor_factory=None,
-        callback=None
-    ):
+                 procname,
+                 parameters=(),
+                 cursor_factory=None,
+                 callback=None
+                 ):
         """
         Call a stored database procedure with the given name.
 
@@ -422,10 +423,10 @@ class Connection:
             self.ioloop.add_callback(partial(callback or _dummy_callback, b'', error))
 
     def transaction(self,
-        statements,
-        cursor_factory=None,
-        callback=None
-    ):
+                    statements,
+                    cursor_factory=None,
+                    callback=None
+                    ):
         """
         Run a sequence of SQL queries in a database transaction.
 
@@ -512,7 +513,7 @@ class Connection:
         Check if the connection is busy or not.
         """
         return self.connection.isexecuting() or (self.connection.closed == 0 and
-            self._transaction_status() != TRANSACTION_STATUS_IDLE)
+                                                 self._transaction_status() != TRANSACTION_STATUS_IDLE)
 
     @property
     def closed(self):
